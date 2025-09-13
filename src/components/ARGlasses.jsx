@@ -1,8 +1,8 @@
 import React, { useRef, useEffect, useState } from "react";
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
-import { FaceMesh } from "@mediapipe/face_mesh";
-import { Camera } from "@mediapipe/camera_utils";
+// import { FaceMesh } from "@mediapipe/face_mesh";
+// import { Camera } from "@mediapipe/camera_utils";
 
 const ARGlasses = () => {
   const videoRef = useRef(null);
@@ -24,6 +24,7 @@ const ARGlasses = () => {
   const [showAR, setShowAR] = useState(false);
   const [selectedGlasses, setSelectedGlasses] = useState(null);
   const [showGlasses, setShowGlasses] = useState(false);
+  const [faceMeshError, setFaceMeshError] = useState(false);
 
   // Smoothing variables for natural movement
   const lastPosition = useRef({ x: 0, y: 0, z: 0 });
@@ -126,53 +127,118 @@ const ARGlasses = () => {
 
   useEffect(() => {
     if (!showAR) return;
+    if (typeof window === 'undefined') return; // Client-side check
 
-    const faceMesh = new FaceMesh({
-      locateFile: (file) =>
-        `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`,
-    });
-
-    faceMesh.setOptions({
-      maxNumFaces: 1,
-      refineLandmarks: true,
-      minDetectionConfidence: 0.3,  // Lower for faster detection
-      minTrackingConfidence: 0.3,   // Lower for faster tracking
-    });
-
-    faceMesh.onResults((results) => {
-      if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
-        const landmarks = results.multiFaceLandmarks[0];
-
-        setLandmarks(landmarks);
-        setStatus("Tracking face...");
-      } else {
-        setStatus("No face detected");
-        setLandmarks(null);
-      }
-    });
-
-    const setupCamera = () => {
-      if (videoRef.current && videoRef.current.srcObject) {
-        const camera = new Camera(videoRef.current, {
-          onFrame: async () => {
-            try {
-              await faceMesh.send({ image: videoRef.current });
-            } catch (error) {
-              console.error("FaceMesh error:", error);
+    const initializeFaceMesh = async () => {
+      try {
+        // Load MediaPipe from CDN using script tags
+        const loadScript = (src) => {
+          return new Promise((resolve, reject) => {
+            if (document.querySelector(`script[src="${src}"]`)) {
+              resolve();
+              return;
             }
-          },
-          width: 640,
-          height: 480,
-          fps: 30,  // Set higher frame rate
+            const script = document.createElement('script');
+            script.src = src;
+            script.type = 'module';
+            script.onload = resolve;
+            script.onerror = reject;
+            document.head.appendChild(script);
+          });
+        };
+
+        // Load MediaPipe modules
+        await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js');
+        await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js');
+
+        // Wait a bit for modules to be available
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        // Try to access MediaPipe from global scope
+        let FaceMesh, Camera;
+        
+        // Check different possible global locations
+        if (window.FaceMesh) {
+          FaceMesh = window.FaceMesh;
+        } else if (window.mediapipe && window.mediapipe.FaceMesh) {
+          FaceMesh = window.mediapipe.FaceMesh;
+        } else if (window.MediaPipe && window.MediaPipe.FaceMesh) {
+          FaceMesh = window.MediaPipe.FaceMesh;
+        }
+
+        if (window.Camera) {
+          Camera = window.Camera;
+        } else if (window.mediapipe && window.mediapipe.Camera) {
+          Camera = window.mediapipe.Camera;
+        } else if (window.MediaPipe && window.MediaPipe.Camera) {
+          Camera = window.MediaPipe.Camera;
+        }
+
+        // If still not found, try dynamic import as fallback
+        if (!FaceMesh || !Camera) {
+          console.log("CDN loading failed, trying dynamic import...");
+          const faceMeshModule = await import('@mediapipe/face_mesh');
+          const cameraModule = await import('@mediapipe/camera_utils');
+          FaceMesh = faceMeshModule.FaceMesh;
+          Camera = cameraModule.Camera;
+        }
+
+        if (!FaceMesh || !Camera) {
+          throw new Error('MediaPipe modules not available');
+        }
+
+        const faceMesh = new FaceMesh({
+          locateFile: (file) =>
+            `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`,
         });
-        camera.start();
-      } else {
-        // console.log("Video not ready, retrying in 100ms...");
-        setTimeout(setupCamera, 100);
+
+        faceMesh.setOptions({
+          maxNumFaces: 1,
+          refineLandmarks: true,
+          minDetectionConfidence: 0.3,
+          minTrackingConfidence: 0.3,
+        });
+
+        faceMesh.onResults((results) => {
+          if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
+            const landmarks = results.multiFaceLandmarks[0];
+            setLandmarks(landmarks);
+            setStatus("Tracking face...");
+          } else {
+            setStatus("No face detected");
+            setLandmarks(null);
+          }
+        });
+
+        const setupCamera = () => {
+          if (videoRef.current && videoRef.current.srcObject) {
+            const camera = new Camera(videoRef.current, {
+              onFrame: async () => {
+                try {
+                  await faceMesh.send({ image: videoRef.current });
+                } catch (error) {
+                  console.error("FaceMesh error:", error);
+                }
+              },
+              width: 640,
+              height: 480,
+              fps: 30,
+            });
+            camera.start();
+          } else {
+            setTimeout(setupCamera, 100);
+          }
+        };
+
+        setTimeout(setupCamera, 500);
+      } catch (error) {
+        console.error("Failed to initialize FaceMesh:", error);
+        setStatus("Error: FaceMesh not available");
+        setFaceMeshError(true);
       }
     };
 
-    setTimeout(setupCamera, 500);
+    initializeFaceMesh();
   }, [showAR]);
 
   const updateHeadAndGlasses = (lm) => {
@@ -633,6 +699,45 @@ const ARGlasses = () => {
   }
 
   // console.log("Rendering AR interface, showAR:", showAR, "selectedGlasses:", selectedGlasses);
+
+  // Show error message if FaceMesh fails to load
+  if (faceMeshError) {
+    return (
+      <div style={{ 
+        position: "relative", 
+        width: "100vw", 
+        height: "100vh",
+        display: "flex",
+        flexDirection: "column",
+        justifyContent: "center",
+        alignItems: "center",
+        backgroundColor: "#f0f0f0"
+      }}>
+        <h2 style={{ color: "#333", marginBottom: "20px" }}>
+          Face Detection Not Available
+        </h2>
+        <p style={{ color: "#666", textAlign: "center", maxWidth: "400px" }}>
+          The face detection library failed to load. This might be due to browser compatibility or network issues. 
+          Please try refreshing the page or using a different browser.
+        </p>
+        <button
+          onClick={() => window.location.reload()}
+          style={{
+            background: "#007bff",
+            color: "white",
+            border: "none",
+            padding: "10px 20px",
+            borderRadius: "5px",
+            cursor: "pointer",
+            fontSize: "16px",
+            marginTop: "20px"
+          }}
+        >
+          Refresh Page
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div style={{ position: "relative", width: "100vw", height: "100vh" }}>
